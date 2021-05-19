@@ -1,6 +1,7 @@
 /* @flow */
 
 import fetchMock from 'fetch-mock';
+import { generateAndCompile } from 'relay-test-utils-internal';
 import RelayNetworkLayer from '../RelayNetworkLayer';
 
 fetchMock.mock({
@@ -70,6 +71,112 @@ describe('RelayNetworkLayer', () => {
       });
       await network.execute(mockOperation, {}, {}).toPromise();
       expect(asyncMW).toHaveBeenCalled();
+    });
+  });
+
+  describe('multipart responses', () => {
+    afterAll(() => {
+      fetchMock.restore();
+    });
+
+    it('should successful return data across parts', async () => {
+      global.fetch = async () => {
+        return {
+          body: {
+            getReader() {
+              return {
+                async read() {
+                  return {
+                    value: Buffer.from(
+                      [
+                        '',
+                        '---',
+                        'Content-Type: application/json',
+                        '',
+                        JSON.stringify({
+                          data: { viewer: { actor: { name: 'Marais' } } },
+                          hasNext: true,
+                        }),
+                        '---',
+                        'Content-Type: application/json',
+                        '',
+                        JSON.stringify({
+                          path: ['viewer'],
+                          data: { account_user: { name: 'Zuck' } },
+                          label: 'RelayNetworkLayerTestQuery$defer$UserFragment',
+                          hasNext: false,
+                        }),
+                        '-----',
+                      ].join('\r\n')
+                    ),
+                    done: false,
+                  };
+                },
+                releaseLock() {
+                  // no op
+                },
+              };
+            },
+          },
+          status: 200,
+          ok: true,
+          bodyUsed: false,
+          headers: new Map([['content-type', 'multipart/mixed; boundary="-"']]),
+        };
+      };
+
+      const { RelayNetworkLayerTestQuery } = generateAndCompile(`
+      query RelayNetworkLayerTestQuery {
+          viewer {
+              actor {
+                  name
+              }
+              account_user {
+                  ...UserFragment @defer
+              }
+          }
+      }
+       fragment UserFragment on User {
+          name
+        }
+      `);
+
+      const network = new RelayNetworkLayer();
+      const payloads = await new Promise((resolve, reject) => {
+        // eslint-disable-next-line no-shadow
+        const payloads = [];
+        network.execute(RelayNetworkLayerTestQuery, {}, {}).subscribe({
+          next(value) {
+            payloads.push(value);
+          },
+          complete() {
+            resolve(payloads);
+          },
+          error(err) {
+            reject(err);
+          },
+        });
+      });
+      expect(payloads).toEqual([
+        {
+          data: { viewer: { actor: { name: 'Marais' } } },
+          errors: undefined,
+          path: undefined,
+          label: undefined,
+          extensions: {
+            is_final: false,
+          },
+        },
+        {
+          path: ['viewer'],
+          data: { account_user: { name: 'Zuck' } },
+          label: 'RelayNetworkLayerTestQuery$defer$UserFragment',
+          errors: undefined,
+          extensions: {
+            is_final: true,
+          },
+        },
+      ]);
     });
   });
 
